@@ -60,6 +60,7 @@ uint32_t button_unpressed = 0;
 uint16_t blink_counter = 0;
 uint8_t battery_level = 0;
 bool acc_inter = 0;
+bool break_flag = 0;
 
 #ifdef ENABLE_LOG
 #	define LS_LOG(c) uart_log(c)
@@ -301,6 +302,32 @@ uint16_t i2c_read_data(uint8_t reg_addr)
     return axis_data;
 }
 
+
+
+void i2c_inactive(void)
+{
+#if 1
+	if (current_rear != REAR_MIN_BREAK || current_rear != REAR_OFF_BREAK ) {
+		i2c_send_data(0x20, 0x07); // CTRL_REG1 -> Power Down
+	}
+#else
+
+#endif
+}
+
+void i2c_active(void)
+{
+#if 1
+	if (current_rear == REAR_MIN_BREAK || current_rear == REAR_OFF_BREAK ) {
+		i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
+	}
+#else
+
+#endif
+}
+
+
+
 /* ====================
  *      Backlight
    ====================*/
@@ -387,6 +414,7 @@ void update_battery(void) {
 }
 
 
+
 /* ====================
  *       Process
    ====================*/
@@ -402,9 +430,11 @@ void process_button(void)
 			LS_LOG('L');
 			if( current_rear == REAR_OFF ) { // 전원 버튼의 역할을 한다.
 				current_rear = prev_rear;     // 길게 눌러서 전원을 키는 동작 가장 최근 사용된 모드로 시작
+				i2c_active(); // REAR_MIN_BREAK, REAR_OFF_BREAK인 경우 100Hz로 구동
 			} else {
 				prev_rear = current_rear; // 마지막 모드를 저장
 				current_rear = REAR_OFF; // 길게 눌러서 전원을 끄는동작
+				i2c_inactive(); // REAR_OFF로 들어가면 power down
 			}
 		}
 	} else if( button_pressed ) {
@@ -415,6 +445,8 @@ void process_button(void)
 				LS_LOG('S');
 				if (current_rear != REAR_OFF) {
 					backlight_mode_change();
+					i2c_inactive(); // REAR_MIN_BREAK, REAR_OFF_BREAK가 아닌 경우 power down
+					i2c_active();
 				}
 			}
 			button_pressed = button_unpressed = 0;
@@ -566,7 +598,7 @@ void peripheral_init(void)
     PINEN |= 0x20;
     PIPEN |= 0x20;
 
-    i2c_send_data(0x20, 0x77); // CTRL_REG1 -> 400Hz
+    i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 400Hz
     i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter
     i2c_send_data(0x22, 0x40); // CTRL_REG3 -> Interrupt 1 setting 0x40, 0x50
     i2c_send_data(0x23, 0x00); // CTRL_REG4 -> BDU(continouse update)
@@ -582,30 +614,6 @@ void peripheral_init(void)
     ENABLE_PIN_INTERRUPT;
 }
 
-
-uint32_t unnormal_time = 0;
-uint32_t normal_time = 0;
-bool break_flag = 0;
-
-void acc_process(void)
-{
-	if (acc_inter) { // 인터럽트가 발생한 경우
-		break_flag = 1;
-		acc_inter = 0;
-	}
-	else
-	{
-		normal_time++;
-	}
-
-
-	if (normal_time > 5 && break_flag) {
-		// 원래 상태로 되돌아가기
-		break_flag = 0;
-		normal_time = 0;
-	}
-	else if (!break_flag) normal_time = 0;
-}
 
 void main(void)
 {
@@ -626,7 +634,6 @@ void main(void)
 			if ( button_pressed < 1 ) {
 				RED_LED = 1; // RED LED OFF
 				GREEN_LED = 1; // GREEN LED OFF
-				// i2c low power mode로 변화 필요
 				clr_SCON_1_TI_1;
 				clr_SCON_1_RI_1;
 				set_PCON_IDLE;
@@ -637,12 +644,26 @@ void main(void)
     	}
 
     	if ( acc_inter ) {
+    		LS_LOG('!');
     		break_flag = !break_flag;
     		acc_inter = 0;
     	}
 
-    	if (break_flag && current_rear != REAR_OFF) backlight_routine(0xFF, 0xFF);
+#if 1
+    	if ( current_rear == REAR_MIN_BREAK || current_rear == REAR_OFF_BREAK ) {
+    		if ( break_flag ) backlight_routine(0xFF, 0xFF);
+    		else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
+    	}
     	else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
+#else
+    	// 최적화 진행 중
+    	if (current_rear & 0x02) {
+    		if ( break_flag ) backlight_routine(0xFF, 0xFF);
+			else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
+    	}
+    	else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
+#endif
+
 
 		if( current_rear != REAR_OFF ) { // 켜져있는 상태
 			update_battery();

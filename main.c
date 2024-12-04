@@ -651,8 +651,6 @@ void Timer2_ISR(void)  __interrupt (5)
 
 
 //uint32_t TIMER2_CT = 65536ul-(20000/256ul*24); // 0xF8B0
-//uint32_t TIMER2_CT = 0x0002;
-
 void Acc_Timer2_Init(void) {
     TIMER2_AUTO_RELOAD_DELAY_MODE;
     TIMER2_DIV_256;                 /* fix divider 256 */
@@ -705,7 +703,7 @@ void mcu_control(void)
 	}
 }
 
-bool temp_flag = 0;
+bool timer_flag = 0;
 uint16_t timer2_counter = 0;
 void main(void)
 {
@@ -757,16 +755,58 @@ void main(void)
 
     	}
 #else
-    	if ( acc_timer ) { // 움직임이 없어서 타이머 인터럽트가 발생하는 경우
-    		LS_LOG('!');
-    		acc_timer = 0;
-    		timer2_counter++;
+    	prev_acc = curr_acc;
+    	curr_acc = i2c_read_data(0x2A);
+
+    	// 현재값을 가져와서 gap을 구한다
+    	if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
+    	else acc_gap = prev_acc - curr_acc;
+
+
+    	if ( acc_gap > 0xFF0 ) { // 브레이크를 잡은 상태
+    		// 타이머가 비활성화
+    		timer_flag = 0;
+    		// RED LED 켜기
+    		RED_LED = 0;
+
+    		// 타이머2 비트 클리어
+    		timer2_counter = 0;
+    	    clr_T2CON_TF2;
+    	    set_T2CON_TR2;
+    	    LS_LOG(':');
+    	    LS_LOGN(acc_gap);
+    	}
+    	else if ( 0x200 < acc_gap && acc_gap <= 0x400 ) { // 주행중인 상태
+    		timer_flag = 0;
+    		// 타이머2 비트 클리어
+
+    		// RED_LED 끄기
+    		RED_LED = 0;
+
+    		// 타이머2 비트 클리어
+    		timer2_counter = 0;
+    	    clr_T2CON_TF2;
+    	    set_T2CON_TR2;
+    	}
+    	else {
+    		if ( acc_timer ) {
+    			acc_timer = 0;
+    			timer2_counter++;
+    		}
+    		RED_LED = 1;
+    	}
+
+    	if ( timer2_counter >= 10 ) {
+    		timer2_counter = 0;
+    		timer_flag = 1;
     	}
 
 
-    	if (timer2_counter >= 5) {
+    	if ( timer_flag ) {
     		GREEN_LED = 1;
-    		timer2_counter = 0;
+    	}
+    	else {
+    		GREEN_LED = 0;
     	}
 
 #endif

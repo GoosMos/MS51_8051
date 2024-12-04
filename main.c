@@ -61,6 +61,7 @@ uint16_t blink_counter = 0;
 uint8_t battery_level = 0;
 bool acc_inter = 0;
 bool break_flag = 0;
+bool timer2_flag = 0;
 
 #ifdef ENABLE_LOG
 #	define LS_LOG(c) uart_log(c)
@@ -108,6 +109,21 @@ void Btn_Interrupt_ISR(void) __interrupt (0)
 	CLEAR_INT0_INTERRUPT_FLAG;
 	POP_SFRS;
 }
+
+
+void Timer2_Interrupt_ISR(void) __interrupt (5)
+{
+    SFRS_TMP = SFRS;              /* for SFRS page */
+    clr_T2CON_TF2;
+
+    if (!timer2_flag) timer2_flag = 1;
+
+    if (SFRS_TMP)                 /* for SFRS page */
+    {
+    	ENABLE_SFR_PAGE1;
+    }
+}
+
 
 void Pin_Interrupt_ISR(void) __interrupt (7)
 {
@@ -300,34 +316,6 @@ uint16_t i2c_read_data(uint8_t reg_addr)
 //	}
 
     return axis_data;
-}
-
-
-
-void i2c_inactive(void)
-{
-#if 1
-	if (current_rear != REAR_MIN_BREAK || current_rear != REAR_OFF_BREAK ) {
-		i2c_send_data(0x20, 0x07); // CTRL_REG1 -> Power Down
-	}
-#else
-	if ( current_rear & 0x02 ) {
-
-	}
-#endif
-}
-
-void i2c_active(void)
-{
-#if 1
-	if (current_rear == REAR_MIN_BREAK || current_rear == REAR_OFF_BREAK ) {
-		i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
-	}
-#else
-	if ( current_rear & 0x02 ) {
-
-	}
-#endif
 }
 
 
@@ -607,7 +595,6 @@ void peripheral_init(void)
     PIPEN |= 0x20;
 
     i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
-//    i2c_send_data(0x20, 0x07); // CTRL_REG1 -> Power Down
     i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter, autoreset, interrupt
     i2c_send_data(0x22, 0x40); // CTRL_REG3 -> Interrupt 1 setting 0x40, 0x50
     i2c_send_data(0x23, 0x00); // CTRL_REG4 -> BDU(continouse update)
@@ -629,81 +616,24 @@ uint32_t curr_acc = 0;
 uint32_t acc_gap = 0;
 bool acc_timer = 0;
 
-void i2c_control(void)
-{
-
-}
-
-
-
-void Timer2_ISR(void)  __interrupt (5)
-{
-    SFRS_TMP = SFRS;              /* for SFRS page */
-    clr_T2CON_TF2;
-
-    if (!acc_timer) acc_timer = 1;
-
-    if (SFRS_TMP)                 /* for SFRS page */
-    {
-    	ENABLE_SFR_PAGE1;
-    }
-}
 
 
 //uint32_t TIMER2_CT = 65536ul-(20000/256ul*24); // 0xF8B0
 void Acc_Timer2_Init(void) {
     TIMER2_AUTO_RELOAD_DELAY_MODE;
     TIMER2_DIV_256;                 /* fix divider 256 */
-#if 1
     TH2 = 0x00;
     TL2 = 0xB0;
     RCMP2H = 0x00;
     RCMP2L = 0xB0;
-#else
-    TH2 = HIBYTE(TIMER2_CT);
-    TL2 = LOBYTE(TIMER2_CT);
-    RCMP2H = HIBYTE(TIMER2_CT);
-    RCMP2L = LOBYTE(TIMER2_CT);
-#endif
     clr_T2CON_TF2;
     set_T2CON_TR2;                                   /* Start Timer2  */
-    ENABLE_TIMER2_INTERRUPT;
+    DISABLE_TIMER2_INTERRUPT;
 }
 
-
-bool mcu_high_pass_filter = 0;
-void mcu_control(void)
-{
-//	mcu_high_pass_filter = 1;  // active mcu high pass filter
-//	i2c_send_data(0x22, 0x00); // inactive i2c high pass filter, off interrupt
-
-	prev_acc = curr_acc; // 새로운 값을 샘플링하기 위함
-	curr_acc = i2c_read_data(0x2A); // 현재 값을 획득
-	LS_LOG(':');
-
-	if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
-	else acc_gap = prev_acc - curr_acc;
-	LS_LOGN(acc_gap);
-
-	if ( acc_gap > 0xFF0 ) {
-		LS_LOG('A');
-		break_flag = 1;
-		RED_LED = 0;
-		// 타이머 클리어
-	}
-	else if ( acc_gap > 0x200 && acc_gap <= 0x400 ) { // 512 < gap <= 1024
-		LS_LOG('B');
-		break_flag = 0;
-		RED_LED = 1;
-		// 타이머 클리어
-	}
-	else {
-		LS_LOG('C');
-		RED_LED = 1;
-	}
-}
 
 bool timer_flag = 0;
+bool mcu_flag = 0;
 uint16_t timer2_counter = 0;
 void main(void)
 {
@@ -721,95 +651,65 @@ void main(void)
 
     while(1)
     {
-#if 0
-    	if ( acc_inter ) { // MCU 필터링 활성화
-    		mcu_high_pass_filter = 1;
-    		GREEN_LED = 0;	// Check MCU Active
-    		i2c_send_data(0x22, 0x00); // Set I2C Interrupt1 Disable
-    		acc_inter = 0;
-    	}
-
-    	if ( mcu_high_pass_filter ) { // MCU 필터링이 활성화인 상태
-    		uint32_t current_y = i2c_read_data(0x2A); // Sampling
-    		acc_gap -= current_y; 	 // High Pass Filter
-
-        	if ( acc_gap > 0x7FF ) { // acc gap is over 4095, High Threshold
-    			break_flag = 1;
-    			clr_T2CON_TF2;
-    		}
-
-        	if ( acc_gap > 0x0F && acc_gap <= 0x3FF && break_flag = 1 ) { // acc gap is lower than 1023, Low Threshold
-        		break_flag = 0;
-        		// 타이머 비트 클리어
-        		clr_T2CON_TF2;
-        	}
-
-        	if ( acc_gap <= 0x0F ) {
-        		// 타이머 reset을 수행하지 않는다.
-        	}
-
-        	if ( break_flag ) backlight_routine(0xFF, 0xFF);
-        	else backlight_routine(0x80, 0x80);
-    	}
-    	else { // MCU inactive, I2C active
-
-    	}
-#else
-    	prev_acc = curr_acc;
-    	curr_acc = i2c_read_data(0x2A);
-
-    	// 현재값을 가져와서 gap을 구한다
-    	if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
-    	else acc_gap = prev_acc - curr_acc;
-
-
-    	if ( acc_gap > 0xFF0 ) { // 브레이크를 잡은 상태
-    		// 타이머가 비활성화
-    		timer_flag = 0;
-    		// RED LED 켜기
-    		RED_LED = 0;
-
-    		// 타이머2 비트 클리어
-    		timer2_counter = 0;
-    	    clr_T2CON_TF2;
-    	    set_T2CON_TR2;
-    	    LS_LOG(':');
-    	    LS_LOGN(acc_gap);
-    	}
-    	else if ( 0x200 < acc_gap && acc_gap <= 0x400 ) { // 주행중인 상태
-    		timer_flag = 0;
-    		// 타이머2 비트 클리어
-
-    		// RED_LED 끄기
-    		RED_LED = 0;
-
-    		// 타이머2 비트 클리어
-    		timer2_counter = 0;
-    	    clr_T2CON_TF2;
-    	    set_T2CON_TR2;
-    	}
-    	else {
-    		if ( acc_timer ) {
-    			acc_timer = 0;
-    			timer2_counter++;
-    		}
-    		RED_LED = 1;
-    	}
-
-    	if ( timer2_counter >= 10 ) {
-    		timer2_counter = 0;
-    		timer_flag = 1;
-    	}
-
-
-    	if ( timer_flag ) {
-    		GREEN_LED = 1;
-    	}
-    	else {
+    	if ( mcu_flag ) { // mcu가 활성화
     		GREEN_LED = 0;
-    	}
+    		prev_acc = curr_acc;
+    		curr_acc = i2c_read_data(0x2A);
 
-#endif
+    		// 센서에서 값을 읽어서 gap을 획득
+    		if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
+    		else acc_gap = prev_acc - curr_acc;
+
+    		if ( acc_gap <= 0x200 ) { // 움직임이 발생하지 않는 경우
+    			RED_LED = 1; // RED LED 끄기
+    			if ( timer2_flag ) { // 인터럽트가 발생했을 경우
+    				timer2_counter++; // 카운터를 증가
+    				timer2_flag = 0; // 인터럽트 플래그 세팅
+    			}
+    			LS_LOG('S');
+    		}
+    		else { // 계속해서 진동이 발생하는 경우
+    			RED_LED = 0;
+    			timer_flag = 0;
+    			timer2_counter = 0;
+        	    clr_T2CON_TF2;
+        	    set_T2CON_TR2;
+    		}
+
+        	if ( timer2_counter >= 10 ) { // 카운터가 10을 넘긴 경우
+        		timer2_counter = 0;
+        		mcu_flag = 0; // mcu비활성화, i2c 활성화
+        		// i2c에 high pass filter interrupt enable config
+        		i2c_send_data(0x21, 0x01); // CTRL_REG2 -> High pass filter interrupt 1 enable
+        		DISABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 비활성화
+        		LS_LOG('!');
+        	}
+
+    	}
+    	else { // i2c가 활성화
+    		GREEN_LED = 1;
+			RED_LED = 1; // RED LED OFF
+			GREEN_LED = 1; // GREEN LED OFF
+			clr_SCON_1_TI_1;
+			clr_SCON_1_RI_1;
+			set_PCON_PD;
+			CALL_NOP;
+			CALL_NOP;
+			clr_PCON_PD;
+
+			if ( acc_inter ) { // i2c에서 인터럽트가 발생한 경우 mcu활성화 i2c 비활성화
+				// i2c high pass filter interrupt disable config
+				mcu_flag = 1;
+				i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter interrupt 1 disable
+				ENABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 활성화
+				acc_inter = 0;
+				LS_LOG('1');
+			}
+			else {
+				LS_LOG('0');
+			}
+    	}
+    	LS_LOG(',');
 		Timer0_Delay(24000000, 1, PERIOD_UNIT);
     }
 }

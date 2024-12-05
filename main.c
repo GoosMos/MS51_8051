@@ -582,7 +582,7 @@ void peripheral_init(void)
     i2c_send_data(0x24, 0x00); // CTRL_REG5 -> Latch Interrupt
     i2c_send_data(0x25, 0x00); // CTRL_REG6
     i2c_send_data(0x30, 0x08); // INT1_CFG
-    i2c_send_data(0x32, 0x10); // INT1_THS -> Interrupt 1 threshold
+    i2c_send_data(0x32, 0x08); // INT1_THS -> Interrupt 1 threshold
     i2c_send_data(0x33, 0x02); // INT1_DURATION
 
 
@@ -603,13 +603,29 @@ void peripheral_init(void)
     ENABLE_PIN_INTERRUPT;
 }
 
+int32_t convert(uint32_t v) {
+	if ( v & 0x8000 ) return (int32_t)(v | 0xFFFF0000);
+	else return (int32_t)v;
+}
+
 
 // 센서에서 값을 읽어서 gap을 획득
 void i2c_sampling(void) {
+#if 0
 	prev_acc = curr_acc;
 	curr_acc = i2c_read_data(0x2A);
 	if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
 	else acc_gap = prev_acc - curr_acc;
+#else
+	prev_acc = curr_acc;
+	curr_acc = i2c_read_data(0x2A);
+
+	int32_t p_acc = convert(prev_acc);
+	int32_t c_acc = convert(curr_acc);
+
+	if ( c_acc > p_acc ) acc_gap = c_acc - p_acc;
+	else acc_gap = p_acc - c_acc;
+#endif
 }
 
 
@@ -634,7 +650,7 @@ void main(void)
 
     Timer0_Delay(24000000, 1000, 1000);
     LS_LOG('S');
-
+#if 1
     while(1)
     {
     	process_button();
@@ -707,4 +723,13 @@ void main(void)
 
 		Timer0_Delay(24000000, 1, PERIOD_UNIT);
     }
+#else
+    while(1)
+    {
+    	i2c_sampling();
+    	LS_LOG(':');
+    	LS_LOGN(acc_gap);
+    	Timer0_Delay(24000000, 1000, 1000);
+    }
+#endif
 }

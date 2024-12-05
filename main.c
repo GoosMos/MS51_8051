@@ -59,8 +59,19 @@ uint32_t button_pressed = 0;
 uint32_t button_unpressed = 0;
 uint16_t blink_counter = 0;
 uint8_t battery_level = 0;
+
 bool acc_inter = 0;
-bool break_flag = 0;
+bool timer2_inter = 0;
+
+
+uint32_t prev_acc = 0;
+uint32_t curr_acc = 0;
+uint32_t acc_gap = 0;
+uint16_t timer2_counter = 0;
+bool timer_flag = 0;
+bool mcu_flag = 0;
+bool break_status = 0; // acc_gap에 따른 브레이크 판단 플래그
+
 
 #ifdef ENABLE_LOG
 #	define LS_LOG(c) uart_log(c)
@@ -108,6 +119,21 @@ void Btn_Interrupt_ISR(void) __interrupt (0)
 	CLEAR_INT0_INTERRUPT_FLAG;
 	POP_SFRS;
 }
+
+
+void Timer2_Interrupt_ISR(void) __interrupt (5)
+{
+    SFRS_TMP = SFRS;              /* for SFRS page */
+    clr_T2CON_TF2;
+
+    if (!timer2_inter) timer2_inter = 1;
+
+    if (SFRS_TMP)                 /* for SFRS page */
+    {
+    	ENABLE_SFR_PAGE1;
+    }
+}
+
 
 void Pin_Interrupt_ISR(void) __interrupt (7)
 {
@@ -209,34 +235,26 @@ void i2c_send_data(uint8_t reg_addr, uint8_t reg_val)
 	clr_I2CON_SI;
 	while(!SI);
 	clr_I2CON_STA;
-	result[check_count++] = I2STAT;
 
 	// Send Sensor Memory Address
 	I2DAT = (GYRO_ADDR | I2C_WR);
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT;
 
 	// Send Reg Address
 	I2DAT = reg_addr;
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT;
 
 	// Send Reg Value
 	I2DAT = reg_val;
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT;
 
     // Send Stop Bit
     set_I2CON_STO;
     clr_I2CON_SI;
     while (STO);
-
-	for (int i = 0;i < check_count; i++) {
-		i2c_error(result[i]);
-	}
 }
 
 uint16_t i2c_read_data(uint8_t reg_addr)
@@ -247,83 +265,47 @@ uint16_t i2c_read_data(uint8_t reg_addr)
 	set_I2CON_STA; // Send Start Bit
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT; // I
 	clr_I2CON_STA;
 
 	I2DAT = (GYRO_ADDR | I2C_WR); // Send Gyro Address + Write Bit
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT; // R
 
 	I2DAT = (reg_addr | 0x80); // Who Am I Reg Address
 	clr_I2CON_SI;
 	while(!SI);
-	result[check_count++] = I2STAT; // E
 
     set_I2CON_STA; // Repeated Start Bit
     clr_I2CON_SI;
     while (!SI);
-    result[check_count++] = I2STAT; // M
     clr_I2CON_STA;
 
     I2DAT = (GYRO_ADDR | I2C_RD); // Send Read Bit
     clr_I2CON_SI;
     while (!SI);
-    result[check_count++] = I2STAT; // K
 
     // Read Data
     set_I2CON_AA;
     clr_I2CON_SI;
     while(!SI);
     axis_data = I2DAT;
-    result[check_count++] = I2STAT;
 
     // Read Next Data
     set_I2CON_AA;
     clr_I2CON_SI;
     while(!SI);
     axis_data = (I2DAT << 8);
-    result[check_count++] = I2STAT;
 
     clr_I2CON_AA; // Send NMAK to Slave
     clr_I2CON_SI;
     while(!SI);
-    result[check_count++] = I2STAT; // X
 
     // Stop
     set_I2CON_STO;
     clr_I2CON_SI;
     while(STO);
 
-//    for (int i = 0;i < check_count; i++) {
-//		i2c_error(result[i]);
-//	}
-
     return axis_data;
-}
-
-
-
-void i2c_inactive(void)
-{
-#if 1
-	if (current_rear != REAR_MIN_BREAK || current_rear != REAR_OFF_BREAK ) {
-		i2c_send_data(0x20, 0x07); // CTRL_REG1 -> Power Down
-	}
-#else
-
-#endif
-}
-
-void i2c_active(void)
-{
-#if 1
-	if (current_rear == REAR_MIN_BREAK || current_rear == REAR_OFF_BREAK ) {
-		i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
-	}
-#else
-
-#endif
 }
 
 
@@ -429,12 +411,10 @@ void process_button(void)
 		if( button_pressed == LONG_PRESS ) { // 길게 눌려졌다면
 			LS_LOG('L');
 			if( current_rear == REAR_OFF ) { // 전원 버튼의 역할을 한다.
-				current_rear = prev_rear;     // 길게 눌러서 전원을 키는 동작 가장 최근 사용된 모드로 시작
-				i2c_active(); // REAR_MIN_BREAK, REAR_OFF_BREAK인 경우 100Hz로 구동
+				current_rear = prev_rear;    // 길게 눌러서 전원을 키는 동작 가장 최근 사용된 모드로 시작
 			} else {
 				prev_rear = current_rear; // 마지막 모드를 저장
-				current_rear = REAR_OFF; // 길게 눌러서 전원을 끄는동작
-				i2c_inactive(); // REAR_OFF로 들어가면 power down
+				current_rear = REAR_OFF;  // 길게 눌러서 전원을 끄는동작
 			}
 		}
 	} else if( button_pressed ) {
@@ -445,8 +425,6 @@ void process_button(void)
 				LS_LOG('S');
 				if (current_rear != REAR_OFF) {
 					backlight_mode_change();
-					i2c_inactive(); // REAR_MIN_BREAK, REAR_OFF_BREAK가 아닌 경우 power down
-					i2c_active();
 				}
 			}
 			button_pressed = button_unpressed = 0;
@@ -586,7 +564,6 @@ void peripheral_init(void)
 
 
     /* I2C(Acc) Init */
-#if 1
     P13_OPENDRAIN_MODE; // SCL
     P14_OPENDRAIN_MODE; // SDA
     P05_INPUT_MODE;     // I2C Interrupt Pin
@@ -598,8 +575,8 @@ void peripheral_init(void)
     PINEN |= 0x20;
     PIPEN |= 0x20;
 
-    i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 400Hz
-    i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter
+    i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
+    i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter, autoreset, interrupt
     i2c_send_data(0x22, 0x40); // CTRL_REG3 -> Interrupt 1 setting 0x40, 0x50
     i2c_send_data(0x23, 0x00); // CTRL_REG4 -> BDU(continouse update)
     i2c_send_data(0x24, 0x00); // CTRL_REG5 -> Latch Interrupt
@@ -607,11 +584,42 @@ void peripheral_init(void)
     i2c_send_data(0x30, 0x08); // INT1_CFG
     i2c_send_data(0x32, 0x10); // INT1_THS -> Interrupt 1 threshold
     i2c_send_data(0x33, 0x02); // INT1_DURATION
-#endif
+
+
+    /* Timer2 Init */
+    // 움직임에 대한 타이머, 일정 시간 동안 움직임이 없을 경우를 확인한다.
+    TIMER2_AUTO_RELOAD_DELAY_MODE;
+    TIMER2_DIV_256;                 /* fix divider 256 */
+    TH2 = 0x00;
+    TL2 = 0xB0;
+    RCMP2H = 0x00;
+    RCMP2L = 0xB0;
+    clr_T2CON_TF2;
+    set_T2CON_TR2; // Start Timer2
+    DISABLE_TIMER2_INTERRUPT;
 
     /* Global Setting */
     ENABLE_GLOBAL_INTERRUPT;
     ENABLE_PIN_INTERRUPT;
+}
+
+
+// 센서에서 값을 읽어서 gap을 획득
+void i2c_sampling(void) {
+	prev_acc = curr_acc;
+	curr_acc = i2c_read_data(0x2A);
+	if ( curr_acc > prev_acc ) acc_gap = curr_acc - prev_acc;
+	else acc_gap = prev_acc - curr_acc;
+}
+
+
+void break_degree(void) {
+	uint32_t curr_deg = i2c_read_data(0x2A);
+	if ( curr_deg > 16368 ) return;
+	if ( curr_deg > 4096 ) {
+		if ( curr_deg > 12032 ) break_status = 1;
+	}
+	else break_status = 0;
 }
 
 
@@ -624,46 +632,73 @@ void main(void)
     log_init();
 #endif
 
-    Timer0_Delay(24000000, 2000, 2000);
+    Timer0_Delay(24000000, 1000, 1000);
     LS_LOG('S');
+
     while(1)
     {
     	process_button();
 
-    	if ( current_rear == REAR_OFF && !is_plugged() ) {
-			if ( button_pressed < 1 ) {
-				RED_LED = 1; // RED LED OFF
-				GREEN_LED = 1; // GREEN LED OFF
-				clr_SCON_1_TI_1;
-				clr_SCON_1_RI_1;
-				set_PCON_IDLE;
-				CALL_NOP;
-				CALL_NOP;
-				clr_PCON_IDLE;
+    	if ( mcu_flag ) { // mcu가 활성화
+    		GREEN_LED = 0;
+
+    		i2c_sampling(); // 센서에서 값을 읽어서 gap을 획득
+
+    		if ( acc_gap <= 512 ) { // 움직임이 발생하지 않는 경우
+    			if ( timer2_inter ) { // 인터럽트가 발생했을 경우
+    				timer2_counter++; // 카운터를 증가
+    				timer2_inter = 0; // 인터럽트 플래그 세팅
+    			}
+    		}
+    		else { // 계속해서 진동이 발생하는 경우
+    			timer_flag = 0;
+    			timer2_counter = 0;
+        	    clr_T2CON_TF2;
+        	    set_T2CON_TR2;
+    		}
+
+    		// 일정한 각도가 넘어가면 break등이 활성화
+    		break_degree();
+
+        	// mcu가 샘플링하는 루틴에서의 후미등 처리
+			if ( (current_rear & 0x02) && break_status ) { // 브레이크를 사용하는 모드의 경우
+				backlight_routine(0xFF, 0xFF);
+			}
+			else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
+
+			// 일정시간 움직임이 없는 경우
+        	if ( timer2_counter >= 10 ) { // 카운터가 10을 넘긴 경우
+        		timer2_counter = 0;
+        		mcu_flag = 0; // mcu비활성화, i2c 활성화
+        		// i2c에 high pass filter interrupt enable config
+        		i2c_send_data(0x21, 0x01); // CTRL_REG2 -> High pass filter interrupt 1 enable
+        		DISABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 비활성화
+        		backlight_routine(0x00, 0x00); // 후미등 끄기
+        		LS_LOG('!');
+        	}
+    	}
+    	else { // i2c가 활성화
+			RED_LED = 1;   // RED LED OFF
+			GREEN_LED = 1; // GREEN LED OFF
+			clr_SCON_1_TI_1;
+			clr_SCON_1_RI_1;
+			set_PCON_PD;
+			CALL_NOP;
+			CALL_NOP;
+			clr_PCON_PD;
+
+			if ( acc_inter ) { // i2c에서 인터럽트가 발생한 경우 mcu활성화 i2c 비활성화
+				// i2c high pass filter interrupt disable config
+				mcu_flag = 1;
+				i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter interrupt 1 disable
+				ENABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 활성화
+				acc_inter = 0;
+				LS_LOG('1');
+			}
+			else {
+				LS_LOG('0');
 			}
     	}
-
-    	if ( acc_inter ) {
-    		LS_LOG('!');
-    		break_flag = !break_flag;
-    		acc_inter = 0;
-    	}
-
-#if 1
-    	if ( current_rear == REAR_MIN_BREAK || current_rear == REAR_OFF_BREAK ) {
-    		if ( break_flag ) backlight_routine(0xFF, 0xFF);
-    		else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
-    	}
-    	else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
-#else
-    	// 최적화 진행 중
-    	if (current_rear & 0x02) {
-    		if ( break_flag ) backlight_routine(0xFF, 0xFF);
-			else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
-    	}
-    	else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
-#endif
-
 
 		if( current_rear != REAR_OFF ) { // 켜져있는 상태
 			update_battery();

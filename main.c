@@ -3,18 +3,19 @@
 
 #define ENABLE_LOG
 
+#define CHARGE_PIN				P00
+#define BUTTON_PIN				P04
 #define ACC_PIN					P05
+#define PLUG_PIN				P07
+#define REAR_ENABLE_PIN			P10
 #define RED_LED 				P11
-#define GREEN_LED 				P15
-#define BUTTON_PIN				P30
 #define REAR_PIN				P12
-#define PLUG_PIN				P10
-#define CHARGE_PIN				P17
+#define GREEN_LED 				P15
 
-#define CLR_BUTTON_PIN 			CLR_BIT0
+
+#define CLR_CHG_PIN 			CLR_BIT0
+#define CLR_BTN_PIN				CLR_BIT4
 #define CLR_ACC_PIN 			CLR_BIT5
-#define CLR_CHG_PIN				CLR_BIT7
-#define CLR_BATTERY_PIN 		CLR_BIT0 // 찾아낼 것
 
 #define GYRO_ADDR				0x32
 #define I2C_CLOCK				32
@@ -68,6 +69,10 @@ uint32_t prev_acc = 0;
 uint32_t curr_acc = 0;
 uint32_t acc_gap = 0;
 uint16_t timer2_counter = 0;
+
+uint32_t movement_timer = 0;
+
+
 bool timer_flag = 0;
 bool mcu_flag = 0;
 bool break_status = 0; // acc_gap에 따른 브레이크 판단 플래그
@@ -107,10 +112,12 @@ void Timer0_Delay(unsigned long u32SYSCLK, unsigned int u16CNT, unsigned int u16
       clr_TCON_TR0;                       //Stop Timer0
       u16CNT --;
     }
+
+    movement_timer++; // 움직임 타이머를 증가
 }
 
 
-void Btn_Interrupt_ISR(void) __interrupt (0)
+void Port0_Interrupt_ISR(void) __interrupt (0)
 {
 	PUSH_SFRS;
 	if ( !button_pressed ) {
@@ -120,7 +127,7 @@ void Btn_Interrupt_ISR(void) __interrupt (0)
 	POP_SFRS;
 }
 
-
+#if 0
 void Timer2_Interrupt_ISR(void) __interrupt (5)
 {
     SFRS_TMP = SFRS;              /* for SFRS page */
@@ -133,17 +140,41 @@ void Timer2_Interrupt_ISR(void) __interrupt (5)
     	ENABLE_SFR_PAGE1;
     }
 }
+#endif
 
+
+bool temp_btn = 0;
+bool temp_chg = 0;
+bool temp_acc = 0;
 
 void Pin_Interrupt_ISR(void) __interrupt (7)
 {
 	PUSH_SFRS;
-	if ( !acc_inter ) {
-		acc_inter = 1;
+
+#if 1
+	if ( PIF &= 0x01 ) { // interrupt channel 0
+		if ( !temp_chg ) temp_chg = 1;
 	}
+
+	PIF &= CLR_CHG_PIN;
+#else
+	if ( PIF & 0x10 ) { //  interrupt channel 4
+		if ( !temp_btn ) temp_btn = 1;
+	}
+
+	if ( PIF & 0x20 ) { //  interrupt channel 5
+		if ( !temp_acc ) temp_acc = 1;
+	}
+
+	PIF &= CLR_BTN_PIN;
 	PIF &= CLR_ACC_PIN;
+#endif
 	POP_SFRS;
 }
+
+
+
+
 
 
 /* ====================
@@ -373,9 +404,10 @@ bool is_charging(void) {
 
 void low_pass_filter(uint16_t input)
 {
+	LS_LOG(':');
+	LS_LOGN(input); // plugged = 1527 - 1528
 	uint16_t sampling_data = (input >> 3);
 	uint16_t prev_sampling_data = current_battery - (current_battery >> 3);
-
 	current_battery = (uint16_t)(sampling_data + prev_sampling_data);
 }
 
@@ -435,6 +467,7 @@ void process_button(void)
 void onboard_routine(void)
 {
 	if( is_plugged() ) { // 충전 케이블이 연결되어있는 상태
+#if 0
 		battery_level = 0;
 		blink_counter = 0;
 
@@ -455,27 +488,48 @@ void onboard_routine(void)
 			RED_LED = 1;
 			return;
 		}
+#else
+		// 이후 CHG_PIN에 따라 로직이 일부 변경될 것
+		battery_level = 0;
+		if ( current_battery > 4200 ) {
+			RED_LED = 1;
+			GREEN_LED = 0;
+			blink_counter = 0;
+		}
+		else {
+			GREEN_LED = 1;
+			if ( blink_counter < 50 ) {
+				RED_LED = 0;
+			} else if ( blink_counter < 500 ) {
+				RED_LED = 1;
+			} else blink_counter = 0;
+
+			blink_counter++;
+		}
+#endif
 	} else { // 충전선이 연결되어있지 않은 상태
 		GREEN_LED = 1;
 
 		if( current_rear == REAR_OFF ) { // 현재 sleep 상태에서 충전선이 연결되어있지 않는 상태
 			RED_LED = 1; // RED LED 끄기
+			LS_LOG('A');
 			return;
 		}
-		if( battery_level == 0 && current_battery > 3250 ) { //3250 3300, 배터리 잔량이 70 ~ 100% 사이인 경우
+		if( battery_level == 0 && current_battery > 4200 ) { //3250 3300, 배터리 잔량이 70 ~ 100% 사이인 경우
 			RED_LED = 1; // RED LED 끄기
 			return;
 		}
-		if( battery_level <= 1 && current_battery > 3000 ) {
+		if( battery_level <= 1 && current_battery > 3200 ) {
 			battery_level = 1;
 			blink_counter ++;
-			if(blink_counter < 50) {
+			if(blink_counter < 100) {
 				RED_LED = 0;
 			} else if( blink_counter < 1000 ) {
 				RED_LED = 1;
 			} else {
 				blink_counter = 0;
 			}
+			LS_LOG('B');
 			return;
 		}
 		if ( battery_level <= 2 && current_battery > 2800 ) { // 10% 구간으로 수정 필요
@@ -488,10 +542,12 @@ void onboard_routine(void)
 			} else {
 				blink_counter = 0;
 			}
+			LS_LOG('C');
 			return;
 		}
 		battery_level = 3;
 		RED_LED = 0; // 계속 점등
+		LS_LOG('D');
 	}
 }
 
@@ -516,6 +572,11 @@ void peripheral_init(void)
 
 	ENABLE_PWM0_CH0_P12_OUTPUT;
 
+	P11_QUASI_MODE;
+	P15_QUASI_MODE;
+	P07_INPUT_MODE;
+	P10_QUASI_MODE;
+
 	P12_PUSHPULL_MODE;
 
     clr_PWMCON0_PWMRUN;
@@ -524,23 +585,34 @@ void peripheral_init(void)
 	PWMPH = MAX_PWM; // 255 bit PWM Period High Byte
 	PWMPL = MAX_PWM; // 255 bit PWM Period Low Byte
 
-	PWM0H = low_bright[current_rear];  // PWM Channel 0~5 Duty High Byte n = 0,1,2,3,4,5
-	PWM0L = high_bright[current_rear]; // PWM Channel 0~5 Duty Low  Byte n = 0,1,2,3,4,5
+	PWM0H = 0;  // PWM Channel 0~5 Duty High Byte n = 0,1,2,3,4,5
+	PWM0L = 0; // PWM Channel 0~5 Duty Low  Byte n = 0,1,2,3,4,5
 
 	clr_SFRS_SFRPAGE;
 	set_PWMCON0_PWMRUN;
 
 
-    /* Button Init */
-	P30_INPUT_MODE; 		// button init - pin30
-	ENABLE_INT0_INTERRUPT;
-    INT0_FALLING_EDGE_TRIG;
+	REAR_ENABLE_PIN = 1;  // PWM ENABLE
 
-    /* Charge Init */
+
+    /* Button Init */
+	P04_INPUT_MODE; 		// button init - P04
+
+	PICON |= 0x40;
+	PINEN |= 0x10;
+	PIPEN |= 0x00;
+
+
+	/* Charge Init */
+	P00_INPUT_MODE;
+
+	PICON |= 0x04;
+	PINEN |= 0x00; // falling interrupt
+	PIPEN |= 0x01; // rising interrupt
 
 
     /* Battery Init */
-	P15_OPENDRAIN_MODE; // P15번 확인해보기
+	P03_OPENDRAIN_MODE; // P03
     SFRS=0;
     ADCCON1 &= 0x8F;
     ADCCON1 |= (0x01&0x07)<<4; // 최적화 가능
@@ -548,7 +620,7 @@ void peripheral_init(void)
     ADCCON2 |= (0x05&0x07)<<1; // 최적화 가능
 
 
-    ENABLE_ADC_AIN7;
+    ENABLE_ADC_CH6;
     clr_ADCCON0_ADCF;
     set_ADCCON0_ADCS;
     while(!(ADCCON0&SET_BIT7));        // Wait ADC flag
@@ -603,6 +675,107 @@ void peripheral_init(void)
     ENABLE_PIN_INTERRUPT;
 }
 
+
+void board_init(void) {
+    /* Prevent Restart */
+    set_SFRS_SFRPAGE; // 이후에 테스트 해볼 것
+    P2S|=0x81;
+    clr_SFRS_SFRPAGE;
+
+
+    /* Backlight Init */
+	clr_CKCON_PWMCKS; // PWM in FSYS freq.
+	PWM0_CLOCK_DIV_1; // PWM div = 1
+
+	ENABLE_PWM0_CH0_P12_OUTPUT;
+
+	P07_INPUT_MODE;
+	P10_QUASI_MODE;
+
+	P12_PUSHPULL_MODE;
+
+    clr_PWMCON0_PWMRUN;
+	set_SFRS_SFRPAGE;
+
+	PWMPH = MAX_PWM; // 255 bit PWM Period High Byte
+	PWMPL = MAX_PWM; // 255 bit PWM Period Low Byte
+
+	PWM0H = 0;  // PWM Channel 0~5 Duty High Byte n = 0,1,2,3,4,5
+	PWM0L = 0; // PWM Channel 0~5 Duty Low  Byte n = 0,1,2,3,4,5
+
+	clr_SFRS_SFRPAGE;
+	set_PWMCON0_PWMRUN;
+	P10 = 1;  // PWM ENABLE
+
+
+    /* Button Init */
+	P04_INPUT_MODE; 		// button init - P04
+
+	PICON |= 0x40;
+	PINEN |= 0x10;
+	PIPEN |= 0x00;
+
+
+	/* Charge Init */
+	P00_INPUT_MODE;
+
+	PICON |= 0x04;
+	PINEN |= 0x00; // falling interrupt
+	PIPEN |= 0x01; // rising interrupt
+
+
+    /* Battery Init */
+	P03_OPENDRAIN_MODE; // P03
+    SFRS=0;
+    ADCCON1 &= 0x8F;
+    ADCCON1 |= (0x01&0x07)<<4; // 최적화 가능
+    ADCCON2 &= 0xF1;
+    ADCCON2 |= (0x05&0x07)<<1; // 최적화 가능
+
+
+    ENABLE_ADC_CH6;
+    clr_ADCCON0_ADCF;
+    set_ADCCON0_ADCS;
+    while(!(ADCCON0&SET_BIT7));        // Wait ADC flag
+
+    current_battery = ADCRH<<4; // 초기화 단계에서 현재 배터리 잔량을 획득
+    current_battery |= ADCRL&0x0F;
+    DISABLE_ADC;
+
+
+    /* Board Led Init */
+    P11_QUASI_MODE;
+	P15_QUASI_MODE;
+
+
+    /* I2C(Acc) Init */
+    P13_OPENDRAIN_MODE; // SCL
+    P14_OPENDRAIN_MODE; // SDA
+    P05_INPUT_MODE;     // I2C Interrupt Pin
+
+    I2CLK = I2C_CLOCK;
+    set_I2CON_I2CEN;
+
+    PICON |= 0x40;
+    PINEN |= 0x20;
+    PIPEN |= 0x20;
+
+    i2c_send_data(0x20, 0x57); // CTRL_REG1 -> 100Hz
+    i2c_send_data(0x21, 0x00); // CTRL_REG2 -> High pass filter, autoreset, interrupt
+    i2c_send_data(0x22, 0x40); // CTRL_REG3 -> Interrupt 1 setting 0x40, 0x50
+    i2c_send_data(0x23, 0x00); // CTRL_REG4 -> BDU(continouse update)
+    i2c_send_data(0x24, 0x00); // CTRL_REG5 -> Latch Interrupt
+    i2c_send_data(0x25, 0x00); // CTRL_REG6
+    i2c_send_data(0x30, 0x08); // INT1_CFG
+    i2c_send_data(0x32, 0x08); // INT1_THS -> Interrupt 1 threshold
+    i2c_send_data(0x33, 0x02); // INT1_DURATION
+
+
+    /* Global Setting */
+    ENABLE_GLOBAL_INTERRUPT;
+    ENABLE_PIN_INTERRUPT;
+}
+
 int32_t convert(uint32_t v) {
 	if ( v & 0x8000 ) return (int32_t)(v | 0xFFFF0000);
 	else return (int32_t)v;
@@ -639,25 +812,23 @@ void break_degree(void) {
 }
 
 
+
 void main(void)
 {
     MODIFY_HIRC(HIRC_24);
     peripheral_init();
-
 #ifdef ENABLE_LOG
     log_init();
 #endif
-
     Timer0_Delay(24000000, 1000, 1000);
     LS_LOG('S');
-#if 1
+#if 0
     while(1)
     {
     	process_button();
 
     	if ( mcu_flag ) { // mcu가 활성화
-    		GREEN_LED = 0;
-
+//    		GREEN_LED = 0;
     		i2c_sampling(); // 센서에서 값을 읽어서 gap을 획득
 
     		if ( acc_gap <= 512 ) { // 움직임이 발생하지 않는 경우
@@ -681,21 +852,34 @@ void main(void)
 				backlight_routine(0xFF, 0xFF);
 			}
 			else backlight_routine(low_bright[current_rear], high_bright[current_rear]);
-
+#if 0
 			// 일정시간 움직임이 없는 경우
-        	if ( timer2_counter >= 10 ) { // 카운터가 10을 넘긴 경우
+        	if ( timer2_counter >= 10 ) { // 카운터가 10을 넘긴 경우, 충전선이 연결되지 않은 경우
         		timer2_counter = 0;
-        		mcu_flag = 0; // mcu비활성화, i2c 활성화
-        		// i2c에 high pass filter interrupt enable config
-        		i2c_send_data(0x21, 0x01); // CTRL_REG2 -> High pass filter interrupt 1 enable
-        		DISABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 비활성화
-        		backlight_routine(0x00, 0x00); // 후미등 끄기
-        		LS_LOG('!');
+        		if ( !is_plugged() ) {
+					mcu_flag = 0; // mcu비활성화, i2c 활성화
+					// i2c에 high pass filter interrupt enable config
+					i2c_send_data(0x21, 0x01); // CTRL_REG2 -> High pass filter interrupt 1 enable
+					DISABLE_TIMER2_INTERRUPT; // 타이머2 인터럽트 비활성화
+					backlight_routine(0x00, 0x00); // 후미등 끄기
+					LS_LOG('!');
+        		}
         	}
+#else
+        	if ( movement_timer >= 0xFF ) {
+        		movement_timer = 0;
+        		if ( !is_plugged() ) {
+        			mcu_flag = 0;
+        			i2c_send_data(0x21, 0x01);
+					backlight_routine(0x00, 0x00); // 후미등 끄기
+					LS_LOG('!');
+        		}
+        	}
+#endif
     	}
     	else { // i2c가 활성화
 			RED_LED = 1;   // RED LED OFF
-			GREEN_LED = 1; // GREEN LED OFF
+//			GREEN_LED = 1; // GREEN LED OFF
 			clr_SCON_1_TI_1;
 			clr_SCON_1_RI_1;
 			set_PCON_PD;
@@ -714,6 +898,8 @@ void main(void)
 			else {
 				LS_LOG('0');
 			}
+
+			// 충전 인터럽트가 발생한 경우에도 i2c에서 mcu로 제어권이 넘어가야 한다.
     	}
 
 		if( current_rear != REAR_OFF ) { // 켜져있는 상태
@@ -724,12 +910,6 @@ void main(void)
 		Timer0_Delay(24000000, 1, PERIOD_UNIT);
     }
 #else
-    while(1)
-    {
-    	i2c_sampling();
-    	LS_LOG(':');
-    	LS_LOGN(acc_gap);
-    	Timer0_Delay(24000000, 1000, 1000);
-    }
+
 #endif
 }
